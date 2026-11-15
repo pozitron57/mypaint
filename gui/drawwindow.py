@@ -106,6 +106,8 @@ class DrawWindow (Gtk.Window):
         # Window handling
         self._updating_toggled_item = False
         self.is_fullscreen = False
+        self._macos_titlebar_timeout_id = None
+        self._macos_titlebar_tries_left = 0
 
         # Enable drag & drop
         drag_targets = [
@@ -299,6 +301,76 @@ class DrawWindow (Gtk.Window):
     def _macos_quit_idle_cb(self):
         self.quit_cb()
         return False
+
+    #: Local modification: whether to stop the window's title bar from
+    #: sliding down together with the macOS menu bar in fullscreen.
+    MACOS_HIDE_FULLSCREEN_TITLEBAR = True
+
+    def _macos_hide_fullscreen_titlebar(self):
+        """Local modification: no title bar under the macOS menu bar
+
+        In fullscreen, macOS moves the window's title bar (the close,
+        minimize and zoom buttons) into a helper window of its own, and
+        slides that down along with the menu bar when the pointer is
+        pushed against the top of the screen. Hiding the helper's
+        contents leaves just the menu bar.
+
+        The helper is made anew each time fullscreen is entered, a
+        little after GDK reports the state change, so look for it a few
+        times. It is thrown away when fullscreen is left, and the title
+        bar goes back to the window untouched.
+
+        There is no public API for this: it goes by the helper's private
+        class name, using pyobjc. If either is missing, the title bar
+        simply slides down like it did before.
+
+        """
+        if sys.platform != "darwin":
+            return
+        if not self.MACOS_HIDE_FULLSCREEN_TITLEBAR:
+            return
+        if self._macos_titlebar_timeout_id is not None:
+            GLib.source_remove(self._macos_titlebar_timeout_id)
+            self._macos_titlebar_timeout_id = None
+        self._macos_titlebar_tries_left = 25
+        if self._macos_hide_fullscreen_titlebar_cb():
+            self._macos_titlebar_timeout_id = GLib.timeout_add(
+                200, self._macos_hide_fullscreen_titlebar_cb)
+
+    def _macos_hide_fullscreen_titlebar_cb(self):
+        """Hides the title bar helper's contents; True means "retry"."""
+        retry = False
+        try:
+            retry = self._macos_hide_fullscreen_titlebar_once()
+        except Exception:
+            logger.exception("Failed to hide the fullscreen title bar")
+        if not retry:
+            self._macos_titlebar_timeout_id = None
+        return retry
+
+    def _macos_hide_fullscreen_titlebar_once(self):
+        if not self.is_fullscreen:
+            return False
+        try:
+            from AppKit import NSApplication
+        except ImportError:
+            logger.warning(
+                "pyobjc not available: "
+                "leaving the window's title bar in fullscreen alone"
+            )
+            return False
+        found = False
+        for nswindow in NSApplication.sharedApplication().windows():
+            if "NSToolbarFullScreenWindow" not in type(nswindow).__name__:
+                continue
+            view = nswindow.contentView()
+            if view is not None:
+                view.setHidden_(True)
+                found = True
+        if found:
+            return False
+        self._macos_titlebar_tries_left -= 1
+        return self._macos_titlebar_tries_left > 0
 
     def _init_toolbars(self):
         self._toolbar_manager = toolbar.ToolbarManager(self)
@@ -592,6 +664,8 @@ class DrawWindow (Gtk.Window):
             event.new_window_state & Gdk.WindowState.FULLSCREEN
         )
         self.update_fullscreen_action()
+        if self.is_fullscreen:
+            self._macos_hide_fullscreen_titlebar()
         # Reset all state for the top mode on the stack. Mainly for
         # freehand modes: https://github.com/mypaint/mypaint/issues/39
         mode = self.app.doc.modes.top
