@@ -13,7 +13,7 @@
 from __future__ import division, print_function
 import math
 import logging
-from collections import deque
+from collections import deque, namedtuple
 from gettext import gettext as _
 
 from lib.gibindings import Gtk
@@ -29,6 +29,8 @@ from .drawutils import spline_4p
 from .sliderwidget import InputSlider
 
 logger = logging.getLogger(__name__)
+
+_StrokeStart = namedtuple('_StrokeStart', 'event_data')
 
 
 ## Class defs
@@ -119,6 +121,7 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             self.motion_queue = deque()
             self.motion_processing_cbid = None
             self._last_queued_event_time = 0
+            self.last_queued_event_data = None
 
             # Queued Event Handling
 
@@ -145,7 +148,7 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             self.last_good_raw_viewrotation = 0.0
             self.last_good_raw_barrel_rotation = 0.0
 
-        def queue_motion(self, event_data):
+        def queue_motion(self, event_data, flush=False, new_stroke=False):
             """Append one raw motion event to the motion queue
 
             :param event_data: Extracted data from an event.
@@ -161,6 +164,10 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             defined values.
 
             Zero-dtime events are detected and cleaned up here.
+            ``flush`` preserves their order at a pen-contact boundary,
+            without waiting for another motion event to arrive.
+            ``new_stroke`` also queues a brush reset, after preceding motion
+            has been processed and before the new contact is rendered.
 
             """
 
@@ -170,6 +177,18 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             if time < self._last_queued_event_time:
                 logger.warning('Time is running backwards! Corrected.')
                 time = self._last_queued_event_time
+            event_data = (time, x, y, pressure, xtilt, ytilt,
+                          viewzoom, viewrotation, barrel_rotation)
+            self.last_queued_event_data = event_data
+
+            if flush or new_stroke:
+                for zdata in self._zero_dtime_motions:
+                    self.motion_queue.append((self._last_queued_event_time,) + zdata)
+                self._zero_dtime_motions = []
+                self.motion_queue.append(
+                    _StrokeStart(event_data) if new_stroke else event_data)
+                self._last_queued_event_time = time
+                return
 
             if time == self._last_queued_event_time:
                 # On Windows, GTK timestamps have a resolution around
@@ -209,6 +228,10 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             """Fetches zero or more events to process from the queue"""
             if len(self.motion_queue) > 0:
                 event = self.motion_queue.popleft()
+                if isinstance(event, _StrokeStart):
+                    self.interp = PressureAndTiltInterpolator()
+                    yield event
+                    return
                 for ievent in self.interp.feed(*event):
                     yield ievent
 
@@ -290,7 +313,15 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             # Mouse button pressed (while painting without pressure
             # information)
             drawstate = self._get_drawing_state(tdw)
-            if not drawstate.last_event_had_pressure:
+            if drawstate.last_event_had_pressure:
+                # A new contact cannot continue the previous stroke, even
+                # when a release or hover event was lost near a window edge.
+                # Lift at the old position before moving to the new one.
+                self._queue_zero_pressure(tdw, event.time)
+                self._queue_zero_pressure(
+                    tdw, event.time, tdw.display_to_model(event.x, event.y),
+                    new_stroke=True)
+            else:
                 # For the mouse we don't get a motion event for
                 # "pressure" changes, so we simulate it. (Note: we can't
                 # use the event's button state because it carries the
@@ -319,7 +350,11 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         if current_layer.get_paintable() and event.button == 1:
             # See comment above in button_press_cb.
             drawstate = self._get_drawing_state(tdw)
-            if not drawstate.last_event_had_pressure:
+            if drawstate.last_event_had_pressure:
+                # Tablet backends need not send a final zero-pressure motion.
+                # Release axes can also still contain the last held pressure.
+                self._queue_zero_pressure(tdw, event.time)
+            else:
                 self.motion_notify_cb(tdw, event, fakepressure=0.0)
             # Notify observers after processing the event
             self.doc.input_stroke_ended(event)
@@ -386,6 +421,13 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         # button pressed down, and substitute the last-known good value.
         # Detail: https://github.com/mypaint/mypaint/issues/29
         drawstate = self._get_drawing_state(tdw)
+        if (drawstate.button_down == 1 and pressure == 0.0
+                and not (state & Gdk.ModifierType.BUTTON1_MASK)):
+            # Hover with both zero pressure and the tip button up recovers a
+            # missed release. End at the old position, not the hover position.
+            self._queue_zero_pressure(tdw, time)
+            drawstate.button_down = None
+            drawstate.last_good_raw_pressure = 0.0
         if drawstate.button_down is not None:
             if pressure == 0.0:
                 pressure = drawstate.last_good_raw_pressure
@@ -480,7 +522,26 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         event_data = (time, x, y, pressure,
                       xtilt, ytilt, viewzoom,
                       viewrotation, barrel_rotation)
-        drawstate.queue_motion(event_data)
+        self._queue_motion(tdw, event_data)
+
+    def _queue_zero_pressure(self, tdw, time, position=None, new_stroke=False):
+        """Queue a contact boundary without pressure mapping or evdev fill-in."""
+        drawstate = self._get_drawing_state(tdw)
+        previous = drawstate.last_queued_event_data
+        if previous is None:
+            return
+        data = list(previous)
+        data[0] = time
+        data[3] = 0.0
+        if position is not None:
+            data[1:3] = position
+            data[6:8] = (tdw.scale, tdw.rotation)
+        self._queue_motion(tdw, tuple(data), flush=True, new_stroke=new_stroke)
+
+    def _queue_motion(self, tdw, event_data, flush=False, new_stroke=False):
+        """Queue motion or a contact boundary, preserving asynchronous delivery."""
+        drawstate = self._get_drawing_state(tdw)
+        drawstate.queue_motion(event_data, flush=flush, new_stroke=new_stroke)
         # Start the motion event processor, if it isn't already running
         if not drawstate.motion_processing_cbid:
             cbid = GLib.idle_add(
@@ -512,6 +573,9 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
     def _process_queued_event(self, tdw, event_data):
         """Process one motion event from the motion queue"""
         drawstate = self._get_drawing_state(tdw)
+        new_stroke = isinstance(event_data, _StrokeStart)
+        if new_stroke:
+            event_data = event_data.event_data
         (time, x, y, pressure, xtilt, ytilt, viewzoom,
          viewrotation, barrel_rotation) = event_data
         model = tdw.doc
@@ -541,6 +605,11 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         current_layer = model._layers.current
         if not current_layer.get_paintable():
             return
+        if new_stroke:
+            # Reset tracking/smoothing too, not just pressure. Doing this in
+            # queue order keeps pending old motion out of the new stroke and
+            # records the boundary for undo and brush-stroke replay.
+            self.brushwork_begin(model, abrupt=True)
 
         # Feed data to the brush engine.  Pressure and tilt cleanup
         # needs to be done here to catch all forwarded data after the
