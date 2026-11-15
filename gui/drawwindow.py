@@ -20,6 +20,7 @@ from __future__ import division, print_function
 
 import os
 import os.path
+import sys
 import webbrowser
 from warnings import warn
 import logging
@@ -28,6 +29,7 @@ import xml.etree.ElementTree as ET
 
 from lib.gibindings import Gtk
 from lib.gibindings import Gdk
+from lib.gibindings import GLib
 
 from . import compatibility
 from . import historypopup
@@ -235,6 +237,68 @@ class DrawWindow (Gtk.Window):
             self.app.doc.tdw,
         )
         self.menubar = self.app.ui_manager.get_widget('/Menubar')
+        self._init_macos_menubar(menubar_xml)
+
+    def _init_macos_menubar(self, xml):
+        """Local modification: mirror the menus in the macOS menu bar
+
+        GTK gives the application no Cocoa main menu, and with none set
+        macOS doesn't bring its menu bar (clock, status icons) in when
+        the pointer is pushed against the top of a fullscreen window:
+        only the window's title bar slides down, under an empty strip.
+
+        gtk-mac-integration keeps a Cocoa copy of a GtkMenuBar in sync,
+        so hand it a duplicate of the main one. The in-window menubar
+        can't be used directly because its items get moved elsewhere in
+        fullscreen (see gui.topbar).
+
+        """
+        if sys.platform != "darwin":
+            return
+        try:
+            import gi
+            gi.require_version("GtkosxApplication", "1.0")
+            from gi.repository import GtkosxApplication
+        except (ImportError, ValueError):
+            logger.warning(
+                "gtk-mac-integration not available: "
+                "leaving the macOS menu bar empty"
+            )
+            return
+        ui_elt = ET.fromstring(xml)
+        ui_elt.find("menubar").attrib["name"] = "MacMenubar"
+        self.app.ui_manager.add_ui_from_string(
+            ET.tostring(ui_elt).decode("utf-8"))
+        macmenubar = self.app.ui_manager.get_widget('/MacMenubar')
+        # The duplicate has to live inside the window, but is never shown
+        # there: Cocoa draws its own copy.
+        macmenubar.set_no_show_all(True)
+        macmenubar.hide()
+        topbar = self.app.builder.get_object("app_topbar")
+        topbar.attach(macmenubar, 0, 9, 2, 1)
+        macapp = GtkosxApplication.Application()
+        # Keypresses must keep going to gui.keyboard and nowhere else:
+        # Cocoa is only to display the shortcuts, never to act on them.
+        macapp.set_use_quartz_accelerators(False)
+        macapp.set_menu_bar(macmenubar)
+        macapp.connect(
+            "NSApplicationBlockTermination", self._macos_quit_request_cb)
+        macapp.ready()
+        self._macos_app = macapp
+
+    def _macos_quit_request_cb(self, macapp):
+        """Handles Quit from the macOS application menu or the Dock
+
+        Cocoa would terminate the process there and then. Veto that, and
+        go through the normal quit instead, which offers to save first.
+
+        """
+        GLib.idle_add(self._macos_quit_idle_cb)
+        return True
+
+    def _macos_quit_idle_cb(self):
+        self.quit_cb()
+        return False
 
     def _init_toolbars(self):
         self._toolbar_manager = toolbar.ToolbarManager(self)
