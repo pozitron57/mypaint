@@ -1,0 +1,18 @@
+{
+  "snapshot_date": "2026-11-15",
+  "upstream_commit": "b07b90589c24978750e204b0311a81ff74fd0f47",
+  "installed_version": "2.1.0-alpha+git.b07b9058",
+  "installed_source_directory": "/usr/local/lib/mypaint",
+  "hash_algorithm": "SHA-256",
+  "files": {
+    "gui/accelmap.py": "7720406337529df5d2f48b42854cc343d2dc8fc58c6ac0ea3a5700afa8c67a13",
+    "gui/document.py": "2dd64f507a36d33e8c7de58694800d507c89f4e0096d770ed99f5564434e979e",
+    "gui/drawwindow.py": "fc90d308c9f0af67406de70aa1b5dc7407ac59833c39822fc6b02aea263d02ba",
+    "gui/keyboard.py": "51ae6196c93596ea0e9cf01faa562799b7a6754fea0a6b6defad8eafdfa68ae3",
+    "gui/keyboardutils.py": "94b4fcc429939ceb0f44159473d3d2308c6f59378c3338713d0d5b3a8fd2eb10",
+    "gui/mode.py": "db1eb7685e1e96c9c2e32b94d0f19fc5a0942ad2307b639807569646563b60f1",
+    "gui/sliderwidget.py": "f27f438dbbc8ca8a43fb69dffcbfbdf304bc4b2b9f858371527eeaa104bd5a4f",
+    "gui/workspace.py": "16d0f118d35450764022bee70ca108ef505c96725138ae40fcb621b8a88a009f",
+    "lib/glib.py": "2ef17e8eb83a269073946cd39768448865075b7f1c90528a088a4f925553f542"
+  }
+}
