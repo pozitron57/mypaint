@@ -1,1 +1,6 @@
 *.svg -crlf -diff
+
+# Preserve the checksummed profile exactly, including MyPaint's brush formatting.
+personal-profile/config/** -text
+personal-profile/data/** -text
+personal-profile/data/brushes/** -whitespace
