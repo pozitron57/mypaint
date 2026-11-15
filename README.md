@@ -1,3 +1,26 @@
+# Личная версия MyPaint для онлайн-уроков
+
+Рабочие исходники с модификациями для macOS находятся в ветке
+**[`codex/teaching-board`](https://github.com/pozitron57/mypaint/tree/codex/teaching-board)**.
+
+Сохранены горячие клавиши для разных раскладок, панели только по Tab,
+вставка под текущий курсор, системное меню macOS, скрытие полноэкранного
+заголовка, замедленная в четыре раза прокрутка трекпадом и две правки
+совместимости PyGObject.
+
+- [Полный список отличий и инструкции](https://github.com/pozitron57/mypaint/blob/codex/teaching-board/LOCAL_CHANGES.md)
+- [Все личные изменения относительно исходной версии](https://github.com/pozitron57/mypaint/compare/b07b90589c24978750e204b0311a81ff74fd0f47...codex/teaching-board)
+- [Контрольные суммы сохранённых файлов](https://github.com/pozitron57/mypaint/blob/codex/teaching-board/doc/teaching-board-source-manifest.json)
+
+Снимок от 15 ноября 2026 года сохраняет исходники работающей установки
+`2.1.0-alpha+git.b07b9058` без обновления её исходной базы.
+Ветка `master` содержит прежний код оригинала; здесь изменено только это описание.
+Настройки, рисунки и готовый установщик в форк не входят.
+
+Ниже сохранено исходное описание проекта MyPaint.
+
+---
+
 <p align="center">
     <img src="pixmaps/mypaint_logo.png?raw=true" height="100px"/>
     <h1 align="center">MyPaint</h1>
