@@ -37,6 +37,12 @@ def load_freehand():
         def __init__(self, **kwargs):
             pass
 
+        def enter(self, doc, **kwargs):
+            self.doc = doc
+
+        def leave(self, **kwargs):
+            pass
+
         def button_press_cb(self, *args):
             return False
 
@@ -60,6 +66,7 @@ def load_freehand():
     ids = itertools.count(1)
     bindings.GLib = types.SimpleNamespace(
         PRIORITY_DEFAULT_IDLE=200, idle_add=lambda *args, **kwargs: next(ids),
+        source_remove=lambda source_id: None,
     )
     tdw = types.ModuleType("gui.tileddrawwidget")
     tdw.TiledDrawWidget = object
@@ -94,7 +101,9 @@ class FreehandStrokeBoundaryTest(unittest.TestCase):
         self.mode._debug = False
         self.started, self.ended, self.painted = [], [], []
         self.boundaries = []
+        self.commits = []
         self.mode.brushwork_begin = lambda model, abrupt=False: self.boundaries.append(abrupt)
+        self.mode.brushwork_commit_all = lambda abrupt=False: self.commits.append(abrupt)
         self.mode.doc = types.SimpleNamespace(
             input_stroke_started=self.started.append,
             input_stroke_ended=self.ended.append,
@@ -245,6 +254,63 @@ class FreehandStrokeBoundaryTest(unittest.TestCase):
         self.assertTrue(all(item[0] >= 480 for item in actions[last_reset + 1:]))
         self.assert_no_bridge()
 
+    def test_entering_pan_cancels_pending_input_and_closes_recording(self):
+        self.first_stroke()
+        self.send(Event("motion", 140, 40, 9, 0.7, BUTTON1), drain=False)
+        self.send(Event("motion", 140, 40, 8, 0.7, BUTTON1), drain=False)
+        state = self.mode._get_drawing_state(self.tdw)
+        callback = state.motion_processing_cbid
+        painted_before = list(self.painted)
+        with patch.object(self.subject.GLib, "source_remove") as remove:
+            self.mode.leave()
+        remove.assert_called_once_with(callback)
+        self.assertEqual(self.painted, painted_before)
+        self.assertEqual(self.commits, [True])
+        self.assertEqual(self.mode._drawing_state, {})
+
+    def test_mouse_click_after_pan_starts_a_new_brush_recording(self):
+        self.first_stroke()
+        controller = self.mode.doc
+        self.mode.leave()
+        self.mode.enter(controller)
+        before = len(self.boundaries)
+        for event in [Event("press", 160, 480, 150),
+                      Event("motion", 170, 480, 150, state=BUTTON1),
+                      Event("release", 180, 480, 150, state=BUTTON1),
+                      Event("motion", 190, 480, 150)]:
+            self.send(event)
+        self.assertEqual(self.boundaries[before:], [True])
+        self.assertTrue(any(p[1] == 480 and p[3] == 0.5 for p in self.painted))
+
+    def test_first_trackpad_click_after_pen_hover_still_paints(self):
+        self.first_stroke()
+        self.send(Event("release", 140, 40, 10, 0.0, BUTTON1))
+        self.send(Event("press", 160, 480, 150))
+        self.send(Event("release", 170, 480, 150, state=BUTTON1))
+        self.assertTrue(any(p[1] == 480 and p[3] == 0.5 for p in self.painted))
+
+    def test_switch_to_trackpad_flushes_old_motion_before_reset(self):
+        self.first_stroke()
+        self.send(Event("motion", 140, 40, 9, 0.7, BUTTON1), drain=False)
+        self.send(Event("motion", 150, 480, 150), drain=False)
+        self.drain()
+        for previous, current in zip(self.painted, self.painted[1:]):
+            if abs(current[1] - previous[1]) > 100:
+                self.assertEqual((previous[3], current[3]), (0.0, 0.0))
+        self.assertEqual(self.mode._get_drawing_state(self.tdw).button_down, None)
+
+    def test_stale_button_mask_cannot_make_trackpad_hover_paint(self):
+        self.send(Event("motion", 100, 40, 10))
+        self.send(Event("motion", 110, 480, 150, state=BUTTON1))
+        self.send(Event("motion", 120, 481, 150, state=BUTTON1))
+        self.assertFalse(any(p[3] > 0 for p in self.painted))
+
+    def test_first_pen_press_without_hover_keeps_its_pressure_sample(self):
+        self.send(Event("press", 100, 480, 150, 0.7))
+        self.send(Event("release", 110, 480, 150, 0.0, BUTTON1))
+        self.assertEqual(self.boundaries, [True])
+        self.assertTrue(any(p[1:4] == (480, 150, 0.7) for p in self.painted))
+
     def test_native_brush_engine_does_not_draw_a_bridge(self):
         try:
             from lib import mypaintlib as engine
@@ -263,8 +329,8 @@ class FreehandStrokeBoundaryTest(unittest.TestCase):
 
         settings = json.loads((ROOT / "personal-profile/data/brushes/classic/pen.myb").read_text())["settings"]
         inputs = {info["name"]: i for i, info in enumerate(engine.get_libmypaint_brush_inputs())}
-        for release_received in (True, False):
-            with self.subTest(release_received=release_received):
+        for scenario in ("pen-release", "pen-lost-release", "pan-trackpad", "switch-trackpad"):
+            with self.subTest(scenario=scenario):
                 self.setUp()
                 surface = Surface()
                 brush = engine.PythonBrush()
@@ -296,14 +362,21 @@ class FreehandStrokeBoundaryTest(unittest.TestCase):
 
                 self.mode.stroke_to = paint
                 self.first_stroke()
-                if release_received:
+                if scenario == "pen-release":
                     self.send(Event("release", 140, 40, 10, 0.7, BUTTON1))
-                for event in [Event("press", 160, 480, 150, 0.7),
-                              Event("motion", 170, 480, 150, 0.7, BUTTON1),
-                              Event("motion", 180, 490, 150, 0.7, BUTTON1),
-                              Event("motion", 190, 500, 150, 0.7, BUTTON1),
-                              Event("release", 200, 500, 150, 0.7, BUTTON1),
-                              Event("motion", 210, 500, 150, 0.0)]:
+                elif scenario == "pan-trackpad":
+                    controller = self.mode.doc
+                    self.mode.leave()
+                    self.mode.enter(controller)
+                elif scenario == "switch-trackpad":
+                    self.send(Event("motion", 150, 480, 150))
+                pressure = None if scenario.endswith("trackpad") else 0.7
+                for event in [Event("press", 160, 480, 150, pressure),
+                              Event("motion", 170, 480, 150, pressure, BUTTON1),
+                              Event("motion", 180, 490, 150, pressure, BUTTON1),
+                              Event("motion", 190, 500, 150, pressure, BUTTON1),
+                              Event("release", 200, 500, 150, pressure, BUTTON1),
+                              Event("motion", 210, 500, 150, None if pressure is None else 0.0)]:
                     self.send(event)
                 image = np.zeros((384, 576, 4), dtype=np.uint16)
                 for (tx, ty), pixels in surface.tiles.items():

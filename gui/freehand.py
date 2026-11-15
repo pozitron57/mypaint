@@ -106,6 +106,7 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             object.__init__(self)
 
             self.last_event_had_pressure = False
+            self.last_event_device = None
 
             # Raw data which was delivered with an identical timestamp
             # to the previous one.  Happens on Windows due to differing
@@ -257,6 +258,15 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
 
     def leave(self, **kwds):
         """Leave freehand mode"""
+        # Keep cancellation of queued input responsive, but cancel its idle
+        # callbacks too: they must not run against freshly reset capture state.
+        for drawstate in self._drawing_state.values():
+            if drawstate.motion_processing_cbid is not None:
+                GLib.source_remove(drawstate.motion_processing_cbid)
+                drawstate.motion_processing_cbid = None
+        # A temporary mode (pan, zoom, etc.) leaves this object on the stack.
+        # BrushworkModeMixin otherwise keeps the old recording pressed down.
+        self.brushwork_commit_all(abrupt=True)
         self._reset_drawing_state()
         self._reinstate_drawing_cursor(tdw=None)
         super(FreehandMode, self).leave(**kwds)
@@ -313,21 +323,23 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
             # Mouse button pressed (while painting without pressure
             # information)
             drawstate = self._get_drawing_state(tdw)
-            if drawstate.last_event_had_pressure:
-                # A new contact cannot continue the previous stroke, even
-                # when a release or hover event was lost near a window edge.
-                # Lift at the old position before moving to the new one.
-                self._queue_zero_pressure(tdw, event.time)
-                self._queue_zero_pressure(
-                    tdw, event.time, tdw.display_to_model(event.x, event.y),
-                    new_stroke=True)
-            else:
+            # Every contact starts independently, including a mouse click
+            # after a tablet stroke or after returning from a temporary mode.
+            self._queue_zero_pressure(tdw, event.time)
+            self._queue_zero_pressure(
+                tdw, event.time, tdw.display_to_model(event.x, event.y),
+                new_stroke=True)
+            if not self._event_has_pressure(drawstate, event):
                 # For the mouse we don't get a motion event for
                 # "pressure" changes, so we simulate it. (Note: we can't
                 # use the event's button state because it carries the
                 # old state.)
                 self.motion_notify_cb(tdw, event,
                                       fakepressure=tdw.app.fakepressure)
+            elif not drawstate.last_event_had_pressure:
+                # The first tablet event can itself be a press, with no
+                # preceding hover motion to establish pressure capability.
+                self.motion_notify_cb(tdw, event)
 
             drawstate.button_down = event.button
             drawstate.last_good_raw_pressure = 0.0
@@ -350,7 +362,7 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         if current_layer.get_paintable() and event.button == 1:
             # See comment above in button_press_cb.
             drawstate = self._get_drawing_state(tdw)
-            if drawstate.last_event_had_pressure:
+            if self._event_has_pressure(drawstate, event):
                 # Tablet backends need not send a final zero-pressure motion.
                 # Release axes can also still contain the last held pressure.
                 self._queue_zero_pressure(tdw, event.time)
@@ -388,19 +400,26 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         if not (tdw.is_sensitive and current_layer.get_paintable()):
             return False
 
-        # If the device has changed and the last pressure value from the
-        # previous device is not equal to 0.0, this can leave a visible
-        # stroke on the layer even if the 'new' device is not pressed on
-        # the tablet and has a pressure axis == 0.0.  Resetting the brush
-        # when the device changes fixes this issue, but there may be a
-        # much more elegant solution that only resets the brush on this
-        # edge-case.
+        # Device changes need the same queued boundary as a new contact.
+        # Resetting the brush immediately would run ahead of pending input
+        # from the old device, which can put pressure back into the engine.
+        drawstate = self._get_drawing_state(tdw)
+        device = event.get_source_device()
         same_device = True
         if tdw.app is not None:
-            device = event.get_source_device()
             same_device = tdw.app.device_monitor.device_used(device)
-            if not same_device:
-                tdw.doc.brush.reset()
+        device_changed = (drawstate.last_event_device is not None
+                          and drawstate.last_event_device != device)
+        if not same_device or device_changed:
+            self._queue_zero_pressure(tdw, event.time)
+            self._queue_zero_pressure(
+                tdw, event.time, tdw.display_to_model(event.x, event.y),
+                new_stroke=True)
+            drawstate.button_down = None
+            drawstate.last_good_raw_pressure = 0.0
+            drawstate.last_good_raw_xtilt = 0.0
+            drawstate.last_good_raw_ytilt = 0.0
+        drawstate.last_event_device = device
 
         # Extract the raw readings for this event
         x = event.x
@@ -451,7 +470,8 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
                 pressure = clamp(fakepressure, 0.0, 1.0)
             else:
                 pressure = (
-                    (state & Gdk.ModifierType.BUTTON1_MASK) and
+                    (drawstate.button_down == 1 and
+                     state & Gdk.ModifierType.BUTTON1_MASK) and
                     tdw.app.fakepressure or 0.0)
             drawstate.last_event_had_pressure = False
 
@@ -524,12 +544,21 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
                       viewrotation, barrel_rotation)
         self._queue_motion(tdw, event_data)
 
+    def _event_has_pressure(self, drawstate, event):
+        """Use the current device, not a previous pen's pressure capability."""
+        return (event.get_axis(Gdk.AxisUse.PRESSURE) is not None
+                or (drawstate.last_event_had_pressure
+                    and drawstate.last_event_device == event.get_source_device()))
+
     def _queue_zero_pressure(self, tdw, time, position=None, new_stroke=False):
         """Queue a contact boundary without pressure mapping or evdev fill-in."""
         drawstate = self._get_drawing_state(tdw)
         previous = drawstate.last_queued_event_data
         if previous is None:
-            return
+            if position is None:
+                return
+            previous = (time, position[0], position[1], 0.0, 0.0, 0.0,
+                        tdw.scale, tdw.rotation, 0.0)
         data = list(previous)
         data[0] = time
         data[3] = 0.0
@@ -583,9 +612,9 @@ class FreehandMode (gui.mode.BrushworkModeMixin,
         # Calculate time delta for the brush engine
         last_event_time = drawstate.last_handled_event_time
         drawstate.last_handled_event_time = time
-        if not last_event_time:
+        if not last_event_time and not new_stroke:
             return
-        dtime = (time - last_event_time) / 1000.0
+        dtime = (time - last_event_time) / 1000.0 if last_event_time else 0.0
         if self._debug:
             cavg = drawstate.avgtime
             if cavg is not None:
