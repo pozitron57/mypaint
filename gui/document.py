@@ -940,8 +940,12 @@ class Document (CanvasController):  # TODO: rename to "DocumentController"
         # If pasting with a shortcut, the upper left corner of the content
         # is aligned with the cursor location, otherwise it is centered.
         elif action.keydown:
-            x, y = self.tdw.display_to_model(
-                *self.get_last_event_info(self.tdw)[1:])
+            # Local modification: ask for the pointer's position right now
+            # instead of using the last canvas event. The latter goes stale
+            # when the canvas moves under a motionless pointer (fullscreen
+            # UI being shown or hidden), and the paste then lands beside
+            # the cursor rather than under it.
+            x, y = self.tdw.get_pointer_in_model_coordinates()
         else:
             x, y = self.tdw.get_center_model_coords()
             x -= pixbuf.get_width()/2.0
