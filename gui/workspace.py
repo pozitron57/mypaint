@@ -87,6 +87,12 @@ class Workspace (Gtk.VBox, Gtk.Buildable):
     #: enabled in fullscreen.
     AUTOHIDE_TIMEOUT = 800
 
+    #: Whether moving the pointer near a window edge (or over the place
+    #: where a hidden floating window sits) reveals auto-hidden UI
+    #: elements in fullscreen.  Local modification: turned off, so hidden
+    #: UI only comes back by toggling autohide (Tab by default).
+    AUTOHIDE_POINTER_REVEAL = False
+
     #: Mask for all buttons.
     #: Used to prevent autohide reveals when a pointer button is pressed
     #: down. Prevents a possible source of distraction when the user is
@@ -892,7 +898,10 @@ class Workspace (Gtk.VBox, Gtk.Buildable):
         """Handles entering the canvas in fullscreen"""
         assert self._is_fullscreen
         # If we're safely in the middle, the autohide timer can begin now.
-        if not self._get_bumped_edges(widget, event):
+        # With pointer reveals off, edges are no different to the middle.
+        at_edge = (self.AUTOHIDE_POINTER_REVEAL
+                   and self._get_bumped_edges(widget, event))
+        if not at_edge:
             self._start_autohide_timeout()
         return False
 
@@ -903,6 +912,13 @@ class Workspace (Gtk.VBox, Gtk.Buildable):
         if event.state & self._ALL_BUTTONS_MASK:
             self._cancel_autohide_timeout()
             self._cancel_autoreveal_timeout()
+            return False
+        # Pointer reveals turned off: the pointer never brings hidden UI
+        # back. Just keep the hide timer running, so that anything shown
+        # by other means still goes away again as it did before.
+        if not self.AUTOHIDE_POINTER_REVEAL:
+            self._cancel_autoreveal_timeout()
+            self._start_autohide_timeout()
             return False
         # Floating window rollovers
         show_floating = False
