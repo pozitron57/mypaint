@@ -438,7 +438,11 @@ class ScrollableModeMixin (InteractionMode):
     """
 
     # Hack conversion factor from smooth scroll units to screen pixels.
-    _PIXELS_PER_SMOOTH_SCROLL_UNIT = 25.0
+    # Local modification: a quarter of the original 25.0, which makes
+    # smooth (trackpad) scrolling four times slower, both for panning
+    # and for Ctrl+scroll zooming. Stepwise scrolling (mouse wheel
+    # clicks, or Shift held down) doesn't use this and is unchanged.
+    _PIXELS_PER_SMOOTH_SCROLL_UNIT = 25.0 / 4
     # Could also use the viewport-page-sized approximation that
     # Gtk.ScrolledWindow uses internally:
     # https://git.gnome.org/browse/gtk+/tree/gtk/gtkscrolledwindow.c?h=gtk-3-14#n2416
